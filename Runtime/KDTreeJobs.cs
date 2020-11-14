@@ -30,7 +30,17 @@ namespace Pastasfuture.KDTree.Runtime
                 {
                     float3 position = positions[i];
                     bool added = KDTree.TryAdd(ref header, ref data, i, position, radius);
-                    Debug.Assert(added);
+                    if (!added)
+                    {
+                        // WARNING: Working around a burst compilation bug here.
+                        // Previously I simply had this code, with no if statement:
+                        // Debug.Assert(added);
+                        // It looks like if we do not operate on this 'added' variable, it is stripped out in release mode,
+                        // which seems to make my assert silently fail, and causes nothing to be added to the KDTree.
+                        // By branching here, it forces the compiler to keep the 'added' variable around.
+                        Debug.Assert(false);
+                        break;
+                    }
                 }
                 
                 headerForJobs[0] = header;
@@ -60,7 +70,17 @@ namespace Pastasfuture.KDTree.Runtime
                     float3 position = positions[i];
                     float radius = radii[i];
                     bool added = KDTree.TryAdd(ref header, ref data, i, position, radius);
-                    Debug.Assert(added);
+                    if (!added)
+                    {
+                        // WARNING: Working around a burst compilation bug here.
+                        // Previously I simply had this code, with no if statement:
+                        // Debug.Assert(added);
+                        // It looks like if we do not operate on this 'added' variable, it is stripped out in release mode,
+                        // which seems to make my assert silently fail, and causes nothing to be added to the KDTree.
+                        // By branching here, it forces the compiler to keep the 'added' variable around.
+                        Debug.Assert(false);
+                        break;
+                    }
                 }
 
                 headerForJobs[0] = header;
