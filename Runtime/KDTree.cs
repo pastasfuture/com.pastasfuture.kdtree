@@ -213,6 +213,7 @@ namespace Pastasfuture.KDTree.Runtime
         [BurstCompile]
         public static float ComputeSortKey(ref KDTreeHeader header, ref KDTreeData data, int i, int sortAxis)
         {
+            Debug.Assert(i >= 0);
             Debug.Assert(i < header.count);
             Debug.Assert(sortAxis >= 0 && sortAxis <= 2);
 
@@ -274,6 +275,10 @@ namespace Pastasfuture.KDTree.Runtime
                 {
                     left = indexC + 1;
                 }
+                
+                Debug.Assert(left >= 0);
+                Debug.Assert(right >= 0);
+                Debug.Assert(right >= left);
             }
 
             //// Debug:
@@ -349,11 +354,17 @@ namespace Pastasfuture.KDTree.Runtime
                 for (int n = 0; n < nodeCountAtDepth; ++n)
                 {
                     // x >> d == x / (1 << d)
+                    uint numBitsNeededHeaderCount = (header.count > 0) ? CeilLog2((uint)header.count) : 0;
+                    uint numBitsNeededNode = (n > 0) ? CeilLog2((uint)n) : 0;
+                    uint numBitsNeeded = numBitsNeededHeaderCount + numBitsNeededNode;
+                    Debug.Assert(numBitsNeeded < 32); // left and right calculations can underflow with large header.counts and node counts.
+                    
                     int left = ((n + 0) * header.count) >> d;
                     int right = (((n + 1) * header.count) >> d) - 1;
 
                     Debug.Assert(left >= 0 && left < header.count);
                     Debug.Assert(right >= 0 && right < header.count);
+                    Debug.Assert(right >= left);
 
                     ComputeAABBFromRange(out float3 aabbMin, out float3 aabbMax, ref header, ref data, left, right);
 
@@ -366,7 +377,6 @@ namespace Pastasfuture.KDTree.Runtime
                         int sortAxis = ComputeSplitAxisFromAABB(aabbMin, aabbMax);
 
                         int pivot = ((right - left) >> 1) + left;
-
                         Debug.Assert(left <= pivot);
                         Debug.Assert(pivot <= right);
 
@@ -454,7 +464,7 @@ namespace Pastasfuture.KDTree.Runtime
             distanceSquared = distanceSquaredMax;
 
             KDTreeTraversalStateGeneralized state = KDTreeTraversalStateGeneralized.zero;
-            while (FindNearestNeighborStacklessGeneralizedLeftFirstIterator(out int left, out int right, ref distanceSquared, ref state, ref header, ref data, position))
+            while (FindNearestNeighborStacklessGeneralizedLeftFirstIterator(out int left, out int right, distanceSquared, ref state, ref header, ref data, position))
             {
                 Debug.Assert(left >= 0 && left < header.count);
                 Debug.Assert(right >= 0 && right < header.count);
@@ -866,7 +876,7 @@ namespace Pastasfuture.KDTree.Runtime
         }
 
         [BurstCompile]
-        public static bool FindNearestNeighborStacklessGeneralizedLeftFirstIterator(out int left, out int right, ref float distanceSquared, ref KDTreeTraversalStateGeneralized state, ref KDTreeHeader header, ref KDTreeData data, float3 position)
+        public static bool FindNearestNeighborStacklessGeneralizedLeftFirstIterator(out int left, out int right, float distanceSquared, ref KDTreeTraversalStateGeneralized state, ref KDTreeHeader header, ref KDTreeData data, float3 position)
         {
             Debug.Assert(IsCreated(ref header, ref data));
             Debug.Assert(header.count > 0);
