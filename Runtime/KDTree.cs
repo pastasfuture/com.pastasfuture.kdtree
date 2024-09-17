@@ -960,153 +960,337 @@ namespace Pastasfuture.KDTree.Runtime
 
             return false;
         }
+        
+        // http://jcgt.org/published/0002/01/03/paper.pdf
+        [BurstCompile]
+        public struct KDTreeTraversalStateGeneralizedOptimized
+        {
+            public uint node;
+            public uint traversal;
 
-        // TODO: There seem to be bugs with the StacklessGeneralizedIterator - so we need to use FindNearestNeighborStacklessGeneralizedLeftFirstIterator for now (which is less optimal).
-        //
-        // [BurstCompile]
-        // public static bool FindNearestNeighborStacklessGeneralizedIterator(out int left, out int right, ref float distanceSquared, ref KDTreeTraversalStateGeneralized state, ref KDTreeHeader header, ref KDTreeData data, float3 position)
-        // {
-        //     Debug.Assert(IsCreated(ref header, ref data));
-        //     Debug.Assert(header.count > 0);
-        //     Debug.Assert(header.depthCount > 0);
-        //     // Debug.Assert(header.depthCount > state.depth);
-        //     // Debug.Assert(state.depth >= 0);
+            public static readonly KDTreeTraversalStateGeneralizedOptimized zero = new KDTreeTraversalStateGeneralizedOptimized
+            {
+                node = 1,
+                traversal = 0
+            };
+        }
 
-        //     left = -1;
-        //     right = -1;
+        [BurstCompile]
+        public static bool FindNearestNeighborStacklessGeneralizedIteratorOptimized(out int left, out int right, float distanceSquared, ref KDTreeTraversalStateGeneralizedOptimized state, ref KDTreeHeader header,
+            ref KDTreeData data, float3 position)
+        {
+            Debug.Assert(IsCreated(ref header, ref data));
+            Debug.Assert(header.count > 0);
+            Debug.Assert(header.depthCount > 0);
 
-        //     while (state.levelStart >= 1)
-        //     {
-        //         int nodeIndex = (int)(state.levelStart + state.levelIndex - 1u
-        //             + state.swapMask - (((state.levelStart + state.levelIndex) & state.swapMask) << 1));
+            left = -1;
+            right = -1;
+            
+            while (state.node > 0)
+            {
+                int nodeIndex = (int)(state.node - 1u);
 
-        //         int depth = (int)CeilLog2(state.levelStart); // TODO: Fixme!
+                int depth = (state.node == 0) ? 0 : (int)FloorLog2((uint)state.node);
 
-        //         if (IsLeaf(ref header, ref data, (int)depth))
-        //         {
-        //             // Leaf node.
-        //             // Return range to loop over all contained elements and find nearest point.
-        //             // Perform an AABB check here to early out.
-        //             // Previous aabb checks during the traversal simply test which side of the split plane we are on.
-        //             // TODO: Rather than AABB against AABB intersection, a more accurate cull would be AABB against sphere.
-        //             float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
-        //             float3 aabbMin = data.aabbs[nodeIndex * 2 + 0];
-        //             float3 aabbMax = data.aabbs[nodeIndex * 2 + 1];
-        //             float3 sampleMin = position - new float3(distance, distance, distance);
-        //             float3 sampleMax = position + new float3(distance, distance, distance);
+                if (IsLeaf(ref header, ref data, (int)depth))
+                {
+                    // Leaf node.
+                    // Return range to loop over all contained elements and find nearest point.
+                    // Perform an AABB check here to early out.
+                    // Previous aabb checks during the traversal simply test which side of the split plane we are on.
+                    float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
+                    float3 aabbMin = data.aabbs[nodeIndex * 2 + 0];
+                    float3 aabbMax = data.aabbs[nodeIndex * 2 + 1];
+                    if (ComputeAABBContainsSphere(aabbMin, aabbMax, position, distance))
+                    {
+                        {
+                            left = ((nodeIndex - (1 << depth) + 1 + 0) * header.count) >> depth;
+                            right = (((nodeIndex - (1 << depth) + 1 + 1) * header.count) >> depth) - 1;
+                        }
 
-        //             if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
-        //             {
-        //                 ComputeNodeIndexRange(out left, out right, ref header, ref data, (int)depth, (int)state.levelIndex);
+                        // Leaf node found, inline traversal state update before returning
+                        ++state.traversal;
+                        int up = (int)CountTrailingZeros(state.traversal);
+                        state.traversal >>= up;
+                        state.node >>= up;
+                        return true;
+                    }
+                }
+                else
+                {
+                    bool isAnyChildrenAccepted = false;
+                    bool isRightChildFirst = false;
+                    bool isRejectOneChild = false;
+                    
+                    // Branch
+                    // Node has children.
+                    // Recurse into nearest child.
+                    // (1 << 0) == 1
+                    // (1 << 1) == 2
+                    // (1 << 2) == 4
+                    // (1 << 4) == 8
+                    //
+                    //          0
+                    //    1            2
+                    //  3   4       5     6
+                    // 7 8 9 10   11 12 13 14
+                    int sortAxisParent = data.splitAxes[nodeIndex];
+                    float splitPlaneParent = data.splitPositions[nodeIndex];
+                    float splitPlaneDistanceSigned = position[sortAxisParent] - splitPlaneParent;
 
-        //                 // Move up a level.
-        //                 state.levelIndex = state.levelIndex + 1;
-        //                 uint up = CountTrailingZeros(state.levelIndex);
-        //                 state.levelStart >>= (int)up;
-        //                 state.levelIndex >>= (int)up;
-        //                 state.swapMask >>= (int)up;
-        //                 state.levelStart = (state.levelStart == 1) ? 0 : state.levelStart; // Signal if we are done, back at root.
-        //                 return true;
-        //             }
-        //         }
-        //         else
-        //         {
-        //             // Branch
-        //             // Node has children.
-        //             // Recurse into nearest child.
-        //             // (1 << 0) == 1
-        //             // (1 << 1) == 2
-        //             // (1 << 2) == 4
-        //             // (1 << 4) == 8
-        //             //
-        //             //          0
-        //             //    1            2
-        //             //  3   4       5     6
-        //             // 7 8 9 10   11 12 13 14
-        //             int sortAxisParent = data.splitAxes[nodeIndex];
-        //             float splitPlaneParent = data.splitPositions[nodeIndex];
-        //             float splitPlaneDistanceSigned = position[sortAxisParent] - splitPlaneParent;
+                    int childNodeIndexAtDepthLeft = (int)(state.node << 1) - 1;
+                    int childNodeIndexAtDepthRight = childNodeIndexAtDepthLeft + 1;
 
-        //             bool isAnyChildrenAccepted = false;
-        //             bool isRightChildFirst = false;
-        //             bool isRejectOneChild = false;
+                    // Use split plane as heuristic for deciding which child to enter first.
+                    isRightChildFirst = splitPlaneDistanceSigned > 0.0f;
 
-        //             int childDepth = depth + 1;
-        //             int childNodeIndexAtDepthLeft = (int)(state.levelIndex << 1) + 0;
-        //             int childNodeIndexAtDepthRight = childNodeIndexAtDepthLeft + 1;
+                    // Use actual AABBs to determine whether or not we need to enter the child.
+                    float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
+                    float3 sampleMin = position - new float3(distance, distance, distance);
+                    float3 sampleMax = position + new float3(distance, distance, distance);
+                    {
 
-        //             // Use split plane as heristic for deciding which child to enter first.
-        //             isRightChildFirst = splitPlaneDistanceSigned > 0.0f;
+                        int nodeIndexChild = childNodeIndexAtDepthLeft;
+                        float3 aabbMin = data.aabbs[nodeIndexChild * 2 + 0];
+                        float3 aabbMax = data.aabbs[nodeIndexChild * 2 + 1];
 
-        //             // Use actual AABBs to determine whether or not we need to enter the child.
-        //             float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
-        //             float3 sampleMin = position - new float3(distance, distance, distance);
-        //             float3 sampleMax = position + new float3(distance, distance, distance);
-        //             {
+                        if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
+                        {
+                            isAnyChildrenAccepted = true;
+                        }
+                        else
+                        {
+                            isRejectOneChild = true;
+                        }
+                    }
 
-        //                 int nodeIndexChild = ComputeNodeParent(ref header, ref data, childDepth, childNodeIndexAtDepthLeft);
-        //                 float3 aabbMin = data.aabbs[nodeIndexChild * 2 + 0];
-        //                 float3 aabbMax = data.aabbs[nodeIndexChild * 2 + 1];
+                    {
 
-        //                 if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
-        //                 {
-        //                     isAnyChildrenAccepted = true;
-        //                 }
-        //                 else
-        //                 {
-        //                     isRejectOneChild = true;
-        //                 }
-        //             }
+                        int nodeIndexChild = childNodeIndexAtDepthRight;
+                        float3 aabbMin = data.aabbs[nodeIndexChild * 2 + 0];
+                        float3 aabbMax = data.aabbs[nodeIndexChild * 2 + 1];
 
-        //             {
+                        if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
+                        {
+                            isAnyChildrenAccepted = true;
+                        }
+                        else
+                        {
+                            isRejectOneChild = true;
+                        }
+                    }
+			
+                    if (isAnyChildrenAccepted)
+                    {
+                        state.node += state.node + (isRightChildFirst ? 1u : 0u);
+                        state.traversal += state.traversal + (isRejectOneChild ? 1u : 0u);
+                        continue;
+                    }
+                }
 
-        //                 int nodeIndexChild = ComputeNodeParent(ref header, ref data, childDepth, childNodeIndexAtDepthRight);
-        //                 float3 aabbMin = data.aabbs[nodeIndexChild * 2 + 0];
-        //                 float3 aabbMax = data.aabbs[nodeIndexChild * 2 + 1];
+                bool isDone = false;
+                {
+                    ++state.traversal;
+                    int up = (int)CountTrailingZeros(state.traversal);
 
-        //                 if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
-        //                 {
-        //                     isAnyChildrenAccepted = true;
-        //                 }
-        //                 else
-        //                 {
-        //                     isRejectOneChild = true;
-        //                 }
-        //             }
+                    state.traversal >>= up;
+                    state.node >>= up;
+		
+                    isDone = state.node <= 1;
 
-        //             if (isAnyChildrenAccepted)
-        //             {
-        //                 state.levelStart <<= 1;
-        //                 state.levelIndex <<= 1;
-        //                 state.swapMask <<= 1;
+                    state.node = state.node + 1 - ((state.node & 1) << 1); // sibling
+                }
 
-        //                 if (isRightChildFirst)
-        //                 {
-        //                     state.swapMask |= 1;
-        //                 }
-        //                 if (isRejectOneChild)
-        //                 {
-        //                     state.levelIndex += 1;
-        //                     state.swapMask ^= 1;
-        //                 }
 
-        //                 continue;
-        //             }
-        //         }
+                if (isDone)
+                {
+                    return false;
+                }
+            }
 
-        //         {
-        //             state.levelIndex = state.levelIndex + 1;
-        //             uint up = CountTrailingZeros(state.levelIndex);
-        //             state.levelStart >>= (int)up;
-        //             state.levelIndex >>= (int)up;
-        //             state.swapMask >>= (int)up;
-        //             if (state.levelStart == 1) { return false; }
-        //         }
+            return false;
+        }
+        
+        [BurstCompile]
+        public static bool FindRayIntersectionStacklessGeneralizedIteratorOptimized(out int left, out int right, float distanceSquared, ref KDTreeTraversalStateGeneralizedOptimized state, ref KDTreeHeader header,
+            ref KDTreeData data, float3 rayOrigin, float3 rayDirectionInverse)
+        {
+            Debug.Assert(IsCreated(ref header, ref data));
+            Debug.Assert(header.count > 0);
+            Debug.Assert(header.depthCount > 0);
 
-        //     };
+            left = -1;
+            right = -1;
+            
+            while (state.node > 0)
+            {
+                int nodeIndex = (int)(state.node - 1u);
 
-        //     return false;
-        // }
+                int depth = (state.node == 0) ? 0 : (int)FloorLog2((uint)state.node);
+
+                if (IsLeaf(ref header, ref data, (int)depth))
+                {
+                    // Leaf node.
+                    // Return range to loop over all contained elements and find nearest point.
+                    // Perform an AABB check here to early out.
+                    // Previous aabb checks during the traversal simply test which side of the split plane we are on.
+                    float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
+                    float3 aabbMin = data.aabbs[nodeIndex * 2 + 0];
+                    float3 aabbMax = data.aabbs[nodeIndex * 2 + 1];
+                    if (ComputeAABBContainsSphere(aabbMin, aabbMax, rayOrigin, distance))
+                    {
+                        {
+                            left = ((nodeIndex - (1 << depth) + 1 + 0) * header.count) >> depth;
+                            right = (((nodeIndex - (1 << depth) + 1 + 1) * header.count) >> depth) - 1;
+                        }
+
+                        // Leaf node found, inline traversal state update before returning
+                        ++state.traversal;
+                        int up = (int)CountTrailingZeros(state.traversal);
+                        state.traversal >>= up;
+                        state.node >>= up;
+                        state.node = state.node + 1 - ((state.node & 1) << 1); // sibling
+                        return true;
+                    }
+                }
+                else
+                {
+                    bool isAnyChildrenAccepted = false;
+                    bool isRightChildFirst = false;
+                    bool isRejectOneChild = false;
+                    
+                    // Branch
+                    // Node has children.
+                    // Recurse into nearest child.
+                    // (1 << 0) == 1
+                    // (1 << 1) == 2
+                    // (1 << 2) == 4
+                    // (1 << 4) == 8
+                    //
+                    //          0
+                    //    1            2
+                    //  3   4       5     6
+                    // 7 8 9 10   11 12 13 14
+                    int childNodeIndexLeft = (int)(state.node << 1) - 1;
+                    int childNodeIndexRight = childNodeIndexLeft + 1;
+
+                    float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
+                    float childLeftT0 = 0.0f;
+                    float childLeftT1 = distance;
+                    {
+                        float3 aabbMin = data.aabbs[childNodeIndexLeft * 2 + 0];
+                        float3 aabbMax = data.aabbs[childNodeIndexLeft * 2 + 1];
+
+                        if (IntersectRayAABB(ref childLeftT0, ref childLeftT1, rayOrigin, rayDirectionInverse, aabbMin, aabbMax))
+                        {
+                            isAnyChildrenAccepted = true;
+                        }
+                        else
+                        {
+                            isRejectOneChild = true;
+                        }
+                    }
+                    
+                    float childRightT0 = 0.0f;
+                    float childRightT1 = distance;
+                    {
+                        float3 aabbMin = data.aabbs[childNodeIndexRight * 2 + 0];
+                        float3 aabbMax = data.aabbs[childNodeIndexRight * 2 + 1];
+                        
+                        if (IntersectRayAABB(ref childRightT0, ref childRightT1, rayOrigin, rayDirectionInverse, aabbMin, aabbMax))
+                        {
+                            isAnyChildrenAccepted = true;
+                            isRightChildFirst = isRejectOneChild
+                                ? true
+                                : ((childLeftT0 == childRightT0)
+                                    ? (childRightT1 < childLeftT1)
+                                    : (childRightT0 < childLeftT0));
+                        }
+                        else
+                        {
+                            isRejectOneChild = true;
+                        }
+                    }
+
+                    if (isAnyChildrenAccepted)
+                    {
+                        state.node += state.node + (isRightChildFirst ? 1u : 0u);
+                        state.traversal += state.traversal + (isRejectOneChild ? 1u : 0u);
+                        continue;
+                    }
+                }
+
+                bool isDone = false;
+                {
+                    ++state.traversal;
+                    int up = (int)CountTrailingZeros(state.traversal);
+
+                    state.traversal >>= up;
+                    state.node >>= up;
+		
+                    isDone = state.node <= 1;
+
+                    state.node = state.node + 1 - ((state.node & 1) << 1); // sibling
+                }
+
+
+                if (isDone)
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+        
+        // https://jcgt.org/published/0002/02/02/
+        [BurstCompile]
+        private static bool IntersectRayAABB( ref float tmin, ref float tmax, float3 rayOrigin, float3 rayDirectionInverse, float3 aabbMin, float3 aabbMax)
+        {
+            float txmin, txmax, tymin, tymax, tzmin, tzmax;
+            txmin = (((rayDirectionInverse.x < 0) ? aabbMax.x : aabbMin.x) - rayOrigin.x) * rayDirectionInverse.x;
+            txmax = (((rayDirectionInverse.x < 0) ? aabbMin.x : aabbMax.x) - rayOrigin.x) * rayDirectionInverse.x;
+            tymin = (((rayDirectionInverse.y < 0) ? aabbMax.y : aabbMin.y) - rayOrigin.y) * rayDirectionInverse.y;
+            tymax = (((rayDirectionInverse.y < 0) ? aabbMin.y : aabbMax.y) - rayOrigin.y) * rayDirectionInverse.y;
+            tzmin = (((rayDirectionInverse.z < 0) ? aabbMax.z : aabbMin.z) - rayOrigin.z) * rayDirectionInverse.z;
+            tzmax = (((rayDirectionInverse.z < 0) ? aabbMin.z : aabbMax.z) - rayOrigin.z) * rayDirectionInverse.z;
+            
+            tmin = math.max(tzmin, math.max(tymin, math.max(txmin, tmin)));
+            tmax = math.min(tzmax, math.min(tymax, math.min(txmax, tmax)));
+            tmax *= 1.00000024f;
+            return tmin <= tmax;
+        }
+        
+        [BurstCompile]
+        // Branchless implementation
+        public static bool IntersectRayTriangle(
+            out float t,
+            out float triangleBarycentricA,
+            out float triangleBarycentricB,
+            out float triangleBarycentricC,
+            float3 rayOrigin, float3 rayDirection, float tmin, float tmax,
+            float3 triangleVertexPositionA, float3 triangleVertexPositionB, float3 triangleVertexPositionC
+        )
+        {
+            float3 e0 = triangleVertexPositionB - triangleVertexPositionA;
+            float3 e1 = triangleVertexPositionA - triangleVertexPositionC;
+            float3 n  = math.cross(e1, e0);
+
+            float3 e2 = (1.0f / math.dot( n, rayDirection)) * (triangleVertexPositionA - rayOrigin);
+            float3 i  = math.cross(rayDirection, e2 );
+
+            triangleBarycentricB  = math.dot( i, e1 );
+            triangleBarycentricC = math.dot( i, e0 );
+            triangleBarycentricA = 1.0f - triangleBarycentricB - triangleBarycentricC;
+            t = math.dot( n, e2 );
+
+            return
+                (t < tmax)
+                && (t > tmin) 
+                && (triangleBarycentricB >= 0.0f)
+                && (triangleBarycentricC >= 0.0f)
+                && ((triangleBarycentricB + triangleBarycentricC) <= 1.0f);
+        }
 
         [BurstCompile]
         private static bool IsNodeLeft(int nodeIndexAtDepth)
@@ -1124,6 +1308,20 @@ namespace Pastasfuture.KDTree.Runtime
         private static bool ComputeAABBContainsAABB(float3 aabbLHSMin, float3 aabbLHSMax, float3 aabbRHSMin, float3 aabbRHSMax)
         {
             return !(math.any(aabbRHSMax < aabbLHSMin) || math.any(aabbRHSMin > aabbLHSMax));
+        }
+        
+        [BurstCompile]
+        private static bool ComputeAABBContainsSphere(float3 aabbMin, float3 aabbMax, float3 spherePosition, float sphereRadius)
+        {
+            float distanceSquared = 0.0f;
+            for( int i = 0; i < 3; i++ )
+            {
+                float v = spherePosition[i];
+                if( v < aabbMin[i] ) distanceSquared += (aabbMin[i] - v) * (aabbMin[i] - v);
+                if( v > aabbMax[i] ) distanceSquared += (v - aabbMax[i]) * (v - aabbMax[i]);
+            }
+
+            return distanceSquared <= (sphereRadius * sphereRadius);
         }
 
         [BurstCompile]
@@ -1171,6 +1369,22 @@ namespace Pastasfuture.KDTree.Runtime
             if (y >= (1u << 2)) { i += 2u; y >>= 2; }
             if (y >= (1u << 1)) { i += 1u; y >>= 1; }
             return (x > (1u << (int)i)) ? (i + 1u) : i;
+        }
+        
+        [BurstCompile]
+        private static uint FloorLog2(uint x)
+        {
+            Debug.Assert(x > 0);
+            uint i = 0;
+            uint y = x;
+    
+            if (y >= (1u << 16)) { i += 16u; y >>= 16; }
+            if (y >= (1u << 8)) { i += 8u; y >>= 8; }
+            if (y >= (1u << 4)) { i += 4u; y >>= 4; }
+            if (y >= (1u << 2)) { i += 2u; y >>= 2; }
+            if (y >= (1u << 1)) { i += 1u; }
+
+            return i;
         }
 
         [BurstCompile]
