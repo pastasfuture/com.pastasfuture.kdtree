@@ -1008,11 +1008,23 @@ namespace Pastasfuture.KDTree.Runtime
                             right = (((nodeIndex - (1 << depth) + 1 + 1) * header.count) >> depth) - 1;
                         }
 
-                        // Leaf node found, inline traversal state update before returning
-                        ++state.traversal;
-                        int up = (int)CountTrailingZeros(state.traversal);
-                        state.traversal >>= up;
-                        state.node >>= up;
+                        {
+                            ++state.traversal;
+                            int up = (int)CountTrailingZeros(state.traversal);
+                            state.traversal >>= up;
+                            state.node >>= up;
+
+                            bool isDone = state.node <= 1;
+
+                            if (isDone)
+                            {
+                                state.node = 0; // force the next iteration of the loop to exit.
+                            }
+                            else
+                            {
+                                state.node = state.node + 1 - ((state.node & 1) << 1); // sibling
+                            }
+                        }
                         return true;
                     }
                 }
@@ -1088,7 +1100,6 @@ namespace Pastasfuture.KDTree.Runtime
                     }
                 }
 
-                bool isDone = false;
                 {
                     ++state.traversal;
                     int up = (int)CountTrailingZeros(state.traversal);
@@ -1096,15 +1107,13 @@ namespace Pastasfuture.KDTree.Runtime
                     state.traversal >>= up;
                     state.node >>= up;
 		
-                    isDone = state.node <= 1;
+                    bool isDone = state.node <= 1;
+                    if (isDone)
+                    {
+                        return false;
+                    }
 
                     state.node = state.node + 1 - ((state.node & 1) << 1); // sibling
-                }
-
-
-                if (isDone)
-                {
-                    return false;
                 }
             }
 
@@ -1145,11 +1154,23 @@ namespace Pastasfuture.KDTree.Runtime
                         }
 
                         // Leaf node found, inline traversal state update before returning
-                        ++state.traversal;
-                        int up = (int)CountTrailingZeros(state.traversal);
-                        state.traversal >>= up;
-                        state.node >>= up;
-                        state.node = state.node + 1 - ((state.node & 1) << 1); // sibling
+                        {
+                            ++state.traversal;
+                            int up = (int)CountTrailingZeros(state.traversal);
+                            state.traversal >>= up;
+                            state.node >>= up;
+
+                            bool isDone = state.node <= 1;
+
+                            if (isDone)
+                            {
+                                state.node = 0; // force the next iteration of the loop to exit.
+                            }
+                            else
+                            {
+                                state.node = state.node + 1 - ((state.node & 1) << 1); // sibling
+                            }
+                        }
                         return true;
                     }
                 }
@@ -1220,7 +1241,8 @@ namespace Pastasfuture.KDTree.Runtime
                     }
                 }
 
-                bool isDone = false;
+                
+
                 {
                     ++state.traversal;
                     int up = (int)CountTrailingZeros(state.traversal);
@@ -1228,15 +1250,13 @@ namespace Pastasfuture.KDTree.Runtime
                     state.traversal >>= up;
                     state.node >>= up;
 		
-                    isDone = state.node <= 1;
+                    bool isDone = state.node <= 1;
+                    if (isDone)
+                    {
+                        return false;
+                    }
 
                     state.node = state.node + 1 - ((state.node & 1) << 1); // sibling
-                }
-
-
-                if (isDone)
-                {
-                    return false;
                 }
             }
 
@@ -1265,6 +1285,7 @@ namespace Pastasfuture.KDTree.Runtime
         // Branchless implementation
         public static bool IntersectRayTriangle(
             out float t,
+            out float3 triangleFaceNormal,
             out float triangleBarycentricA,
             out float triangleBarycentricB,
             out float triangleBarycentricC,
@@ -1275,6 +1296,7 @@ namespace Pastasfuture.KDTree.Runtime
             float3 e0 = triangleVertexPositionB - triangleVertexPositionA;
             float3 e1 = triangleVertexPositionA - triangleVertexPositionC;
             float3 n  = math.cross(e1, e0);
+            triangleFaceNormal = math.normalizesafe(n, new float3(0.0f, 1.0f, 0.0f));
 
             float3 e2 = (1.0f / math.dot( n, rayDirection)) * (triangleVertexPositionA - rayOrigin);
             float3 i  = math.cross(rayDirection, e2 );
