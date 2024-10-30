@@ -46,6 +46,46 @@ namespace Pastasfuture.KDTree.Runtime
                 headerForJobs[0] = header;
             }
         }
+        
+        [BurstCompile]
+        public struct TryAddPositionsAndRadiusConstantWithCountJob : IJob
+        {
+            // In order to work around current limitations of the dependency graph in job system (and copy-style structs),
+            // we supply a NativeArray<KDTree.KDTreeHeader> of Length 1.
+            // This allows the header struct to be updated in the job, and passed to dependant jobs.
+            public NativeArray<KDTree.KDTreeHeader> headerForJobs;
+            public KDTree.KDTreeData data;
+
+            [ReadOnly] public NativeArray<float3> positions;
+            [ReadOnly] public float radius;
+            [ReadOnly] public int count;
+
+            public void Execute()
+            {
+                KDTree.KDTreeHeader header = headerForJobs[0];
+
+                Debug.Assert(KDTree.Capacity(ref header, ref data) >= (header.count + count));
+
+                for (int i = 0, iLen = count; i < iLen; ++i)
+                {
+                    float3 position = positions[i];
+                    bool added = KDTree.TryAdd(ref header, ref data, i, position, radius);
+                    if (!added)
+                    {
+                        // WARNING: Working around a burst compilation bug here.
+                        // Previously I simply had this code, with no if statement:
+                        // Debug.Assert(added);
+                        // It looks like if we do not operate on this 'added' variable, it is stripped out in release mode,
+                        // which seems to make my assert silently fail, and causes nothing to be added to the KDTree.
+                        // By branching here, it forces the compiler to keep the 'added' variable around.
+                        Debug.Assert(false);
+                        break;
+                    }
+                }
+                
+                headerForJobs[0] = header;
+            }
+        }
 
         [BurstCompile]
         public struct TryAddPositionsAndRadiiJob : IJob

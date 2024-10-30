@@ -2,6 +2,7 @@ using UnityEngine;
 using Unity.Mathematics;
 using Unity.Collections;
 using Unity.Burst;
+using Unity.Jobs;
 
 namespace Pastasfuture.KDTree.Runtime
 {
@@ -48,6 +49,16 @@ namespace Pastasfuture.KDTree.Runtime
             header.holeCount = 0;
             header.depthCount = 0;
             header.depthCapacity = 0;
+        }
+        
+        public static void Dispose(ref KDTreeData data, JobHandle jobHandle)
+        {
+            if (data.payloadIndices.IsCreated) { data.payloadIndices.Dispose(jobHandle); }
+            if (data.positions.IsCreated) { data.positions.Dispose(jobHandle); }
+            if (data.radii.IsCreated) { data.radii.Dispose(jobHandle); }
+            if (data.aabbs.IsCreated) { data.aabbs.Dispose(jobHandle); }
+            if (data.splitPositions.IsCreated) { data.splitPositions.Dispose(jobHandle); }
+            if (data.splitAxes.IsCreated) { data.splitAxes.Dispose(jobHandle); }
         }
 
         [BurstCompile]
@@ -357,10 +368,26 @@ namespace Pastasfuture.KDTree.Runtime
                     uint numBitsNeededHeaderCount = (header.count > 0) ? CeilLog2((uint)header.count) : 0;
                     uint numBitsNeededNode = (n > 0) ? CeilLog2((uint)n) : 0;
                     uint numBitsNeeded = numBitsNeededHeaderCount + numBitsNeededNode;
-                    Debug.Assert(numBitsNeeded < 32); // left and right calculations can underflow with large header.counts and node counts.
+                    // Debug.Assert(numBitsNeeded < 32); // left and right calculations can underflow with large header.counts and node counts.
                     
-                    int left = ((n + 0) * header.count) >> d;
-                    int right = (((n + 1) * header.count) >> d) - 1;
+                    int left;
+                    int right;
+                    if (numBitsNeeded < 32)
+                    {
+                        left = ((n + 0) * header.count) >> d;
+                        right = (((n + 1) * header.count) >> d) - 1;
+                    }
+                    else
+                    {
+                        long longLeft = (((long)n + 0) * header.count) >> d;
+                        long longRight = ((((long)n + 1) * header.count) >> d) - 1;
+                        Debug.Assert(longLeft >= 0);
+                        Debug.Assert(longLeft < (long)int.MaxValue);
+                        Debug.Assert(longRight >= 0);
+                        Debug.Assert(longRight < (long)int.MaxValue);
+                        left = (int)longLeft;
+                        right = (int)longRight;
+                    }
 
                     Debug.Assert(left >= 0 && left < header.count);
                     Debug.Assert(right >= 0 && right < header.count);
@@ -653,8 +680,10 @@ namespace Pastasfuture.KDTree.Runtime
         public static void ComputeNodeIndexRange(out int left, out int right, ref KDTreeHeader header, ref KDTreeData data, int depth, int nodeIndexAtDepth)
         {
             // x >> d == x / (1 << depth)
-            left = ((nodeIndexAtDepth + 0) * header.count) >> depth;
-            right = (((nodeIndexAtDepth + 1) * header.count) >> depth) - 1;
+            long longLeft = (((long)nodeIndexAtDepth + 0) * header.count) >> depth;
+            long longRight = ((((long)nodeIndexAtDepth + 1) * header.count) >> depth) - 1;
+            left = (int)longLeft;
+            right = (int)longRight;
         }
 
         [BurstCompile]
@@ -1004,8 +1033,9 @@ namespace Pastasfuture.KDTree.Runtime
                     if (ComputeAABBContainsSphere(aabbMin, aabbMax, position, distance))
                     {
                         {
-                            left = ((nodeIndex - (1 << depth) + 1 + 0) * header.count) >> depth;
-                            right = (((nodeIndex - (1 << depth) + 1 + 1) * header.count) >> depth) - 1;
+                            // Performing this operation in 64 bit is required for kd trees with large element counts and or deep depths.
+                            left = (int)((((long)nodeIndex - (1 << depth) + 1 + 0) * header.count) >> depth);
+                            right = (int)(((((long)nodeIndex - (1 << depth) + 1 + 1) * header.count) >> depth) - 1);
                         }
 
                         {
