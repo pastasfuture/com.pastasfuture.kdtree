@@ -51,14 +51,16 @@ namespace Pastasfuture.KDTree.Runtime
             header.depthCapacity = 0;
         }
         
-        public static void Dispose(ref KDTreeData data, JobHandle jobHandle)
+        public static JobHandle Dispose(ref KDTreeData data, JobHandle jobHandle)
         {
-            if (data.payloadIndices.IsCreated) { data.payloadIndices.Dispose(jobHandle); }
-            if (data.positions.IsCreated) { data.positions.Dispose(jobHandle); }
-            if (data.radii.IsCreated) { data.radii.Dispose(jobHandle); }
-            if (data.aabbs.IsCreated) { data.aabbs.Dispose(jobHandle); }
-            if (data.splitPositions.IsCreated) { data.splitPositions.Dispose(jobHandle); }
-            if (data.splitAxes.IsCreated) { data.splitAxes.Dispose(jobHandle); }
+            JobHandle disposalJobs = default;
+            if (data.payloadIndices.IsCreated) { disposalJobs = data.payloadIndices.Dispose(jobHandle); }
+            if (data.positions.IsCreated) { disposalJobs = JobHandle.CombineDependencies(disposalJobs, data.positions.Dispose(jobHandle)); }
+            if (data.radii.IsCreated) { disposalJobs = JobHandle.CombineDependencies(disposalJobs, data.radii.Dispose(jobHandle)); }
+            if (data.aabbs.IsCreated) { disposalJobs = JobHandle.CombineDependencies(disposalJobs, data.aabbs.Dispose(jobHandle)); }
+            if (data.splitPositions.IsCreated) { disposalJobs = JobHandle.CombineDependencies(disposalJobs, data.splitPositions.Dispose(jobHandle)); }
+            if (data.splitAxes.IsCreated) { disposalJobs = JobHandle.CombineDependencies(disposalJobs, data.splitAxes.Dispose(jobHandle)); }
+            return disposalJobs;
         }
 
         [BurstCompile]
