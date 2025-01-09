@@ -1181,8 +1181,8 @@ namespace Pastasfuture.KDTree.Runtime
                     if (ComputeAABBContainsSphere(aabbMin, aabbMax, rayOrigin, distance))
                     {
                         {
-                            left = ((nodeIndex - (1 << depth) + 1 + 0) * header.count) >> depth;
-                            right = (((nodeIndex - (1 << depth) + 1 + 1) * header.count) >> depth) - 1;
+                            left = (int)(((long)(nodeIndex - (1 << depth) + 1 + 0) * header.count) >> depth);
+                            right = (int)((((long)(nodeIndex - (1 << depth) + 1 + 1) * header.count) >> depth) - 1);
                         }
 
                         // Leaf node found, inline traversal state update before returning
