@@ -167,6 +167,44 @@ namespace Pastasfuture.KDTree.Runtime
                 headerForJobs[0] = header;
             }
         }
+        
+        [BurstCompile]
+        public struct TryAddPaddingJob : IJob
+        {
+            // In order to work around current limitations of the dependancy graph in job system (and copy-style structs),
+            // we supply a NativeArray<KDTree.KDTreeHeader> of Length 1.
+            // This allows the header struct to be updated in the job, and passed to dependant jobs.
+            public NativeArray<KDTree.KDTreeHeader> headerForJobs;
+            public KDTree.KDTreeData data;
+            
+            [ReadOnly] public int paddedCount;
+
+            public void Execute()
+            {
+                KDTree.KDTreeHeader header = headerForJobs[0];
+
+                Debug.Assert(KDTree.Capacity(ref header, ref data) >= paddedCount);
+
+                int paddingStart = header.count;
+                for (int i = paddingStart, iLen = paddedCount; i < iLen; ++i)
+                {
+                    bool added = KDTree.TryAddHoleForPadding(ref header, ref data, i);
+                    if (!added)
+                    {
+                        // WARNING: Working around a burst compilation bug here.
+                        // Previously I simply had this code, with no if statement:
+                        // Debug.Assert(added);
+                        // It looks like if we do not operate on this 'added' variable, it is stripped out in release mode,
+                        // which seems to make my assert silently fail, and causes nothing to be added to the KDTree.
+                        // By branching here, it forces the compiler to keep the 'added' variable around.
+                        Debug.Assert(false);
+                        break;
+                    }
+                }
+
+                headerForJobs[0] = header;
+            }
+        }
 
         [BurstCompile]
         public struct BuildJob : IJob

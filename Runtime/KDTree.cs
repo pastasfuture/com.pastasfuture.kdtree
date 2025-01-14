@@ -170,6 +170,23 @@ namespace Pastasfuture.KDTree.Runtime
         }
 
         [BurstCompile]
+        public static bool TryAddHoleForPadding(ref KDTreeHeader header, ref KDTreeData data, int index)
+        {
+            if (Capacity(ref header, ref data) < (header.count + 1)) { return false; }
+
+            data.payloadIndices[header.count] = index;
+            data.positions[header.count] = float3.zero;
+            data.radii[header.count] = 0.0f;
+            
+            ++header.holeCount;
+            data.payloadIndices[header.count] = -1;
+
+            ++header.count;
+
+            return true;
+        }
+
+        [BurstCompile]
         public static bool IndexIsValid(ref KDTreeHeader header, ref KDTreeData data, int index)
         {
             return data.payloadIndices[index] != -1;
@@ -246,74 +263,126 @@ namespace Pastasfuture.KDTree.Runtime
             (data.radii[indexA], data.radii[indexB]) = (data.radii[indexB], data.radii[indexA]);
         }
 
+        // [BurstCompile]
+        // private static void Quickselect(ref KDTreeHeader header, ref KDTreeData data, int left, int right, int n, int sortAxis)
+        // {
+        //     //int debugLeft = left;
+        //     //int debugRight = right;
+        //
+        //     while (left != right)
+        //     {
+        //
+        //         // Partition:
+        //         int indexC = ((right - left) >> 1) + left;
+        //         float pivotData = ComputeSortKey(ref header, ref data, indexC, sortAxis);
+        //
+        //         Swap(ref header, ref data, indexC, right);
+        //
+        //         indexC = left;
+        //         for (var j = left; j < right; ++j)
+        //         {
+        //             if (ComputeSortKey(ref header, ref data, j, sortAxis) <= pivotData)
+        //             {
+        //
+        //                 Swap(ref header, ref data, indexC, j);
+        //
+        //                 ++indexC;
+        //             }
+        //         }
+        //
+        //         Swap(ref header, ref data, indexC, right);
+        //
+        //         if (indexC == n)
+        //         {
+        //             break;
+        //         }
+        //
+        //         if (n < indexC)
+        //         {
+        //             Debug.Assert(indexC != 0, "Underflow");
+        //             right = indexC - 1;
+        //         }
+        //         else
+        //         {
+        //             left = indexC + 1;
+        //         }
+        //         
+        //         Debug.Assert(left >= 0);
+        //         Debug.Assert(right >= 0);
+        //         Debug.Assert(right >= left);
+        //     }
+        //
+        //     //// Debug:
+        //     //float pivotKey = ComputeSortKey(ref data, n, sortAxis);
+        //     //for (int d = debugLeft; d <= debugRight; ++d)
+        //     //{
+        //     //    if (d < n)
+        //     //    {
+        //     //        if (!(ComputeSortKey(ref data, d, sortAxis) <= pivotKey))
+        //     //        {
+        //     //            Debug.Assert(false);
+        //     //        }
+        //     //    }
+        //     //    else if (d > n)
+        //     //    {
+        //     //        if (!(ComputeSortKey(ref data, d, sortAxis) >= pivotKey))
+        //     //        {
+        //     //            Debug.Assert(false);
+        //     //        }
+        //     //    }
+        //     //}
+        // }
+        
         [BurstCompile]
         private static void Quickselect(ref KDTreeHeader header, ref KDTreeData data, int left, int right, int n, int sortAxis)
         {
-            //int debugLeft = left;
-            //int debugRight = right;
-
-            while (left != right)
+            while (left < right)
             {
+                int pivotIndex = ((right - left) >> 1) + left;
+                float pivotKey = ComputeSortKey(ref header, ref data, pivotIndex, sortAxis);
 
-                // Partition:
-                int indexC = ((right - left) >> 1) + left;
-                float pivotData = ComputeSortKey(ref header, ref data, indexC, sortAxis);
+                // Move the pivot to the end
+                Swap(ref header, ref data, pivotIndex, right);
 
-                Swap(ref header, ref data, indexC, right);
+                // Three-way partitioning (to improve performance with many identical keys, which occurs when there are many empty slots in the tree.
+                int less = left;
+                int equal = left;
+                int greater = right;
 
-                indexC = left;
-                for (var j = left; j < right; ++j)
+                while (equal <= greater)
                 {
-                    if (ComputeSortKey(ref header, ref data, j, sortAxis) <= pivotData)
+                    float keyCurrent = ComputeSortKey(ref header, ref data, equal, sortAxis);
+
+                    if (keyCurrent < pivotKey)
                     {
-
-                        Swap(ref header, ref data, indexC, j);
-
-                        ++indexC;
+                        Swap(ref header, ref data, less, equal);
+                        less++;
+                        equal++;
+                    }
+                    else if (keyCurrent > pivotKey)
+                    {
+                        Swap(ref header, ref data, equal, greater);
+                        greater--;
+                    }
+                    else
+                    {
+                        equal++;
                     }
                 }
 
-                Swap(ref header, ref data, indexC, right);
-
-                if (indexC == n)
+                if (n < less)
                 {
-                    break;
+                    right = less - 1;
                 }
-
-                if (n < indexC)
+                else if (n > greater)
                 {
-                    Debug.Assert(indexC != 0, "Underflow");
-                    right = indexC - 1;
+                    left = greater + 1;
                 }
                 else
                 {
-                    left = indexC + 1;
+                    break;
                 }
-                
-                Debug.Assert(left >= 0);
-                Debug.Assert(right >= 0);
-                Debug.Assert(right >= left);
             }
-
-            //// Debug:
-            //float pivotKey = ComputeSortKey(ref data, n, sortAxis);
-            //for (int d = debugLeft; d <= debugRight; ++d)
-            //{
-            //    if (d < n)
-            //    {
-            //        if (!(ComputeSortKey(ref data, d, sortAxis) <= pivotKey))
-            //        {
-            //            Debug.Assert(false);
-            //        }
-            //    }
-            //    else if (d > n)
-            //    {
-            //        if (!(ComputeSortKey(ref data, d, sortAxis) >= pivotKey))
-            //        {
-            //            Debug.Assert(false);
-            //        }
-            //    }
-            //}
         }
 
         [BurstCompile]
@@ -353,8 +422,6 @@ namespace Pastasfuture.KDTree.Runtime
             Debug.Assert(header.count > 0);
             Debug.Assert(header.depthCapacity >= depthCount);
             Debug.Assert(depthCount > 0);
-
-            CompactHoles(ref header, ref data);
 
             // data.count can reach zero after CompactHoles is executed.
             if (header.count == 0) { return; }
