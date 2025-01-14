@@ -282,6 +282,7 @@ namespace Pastasfuture.KDTree.Runtime
 
                 if (n < indexC)
                 {
+                    Debug.Assert(indexC != 0, "Underflow");
                     right = indexC - 1;
                 }
                 else
@@ -366,20 +367,10 @@ namespace Pastasfuture.KDTree.Runtime
                 int nodeCountAtDepth = 1 << d;
                 for (int n = 0; n < nodeCountAtDepth; ++n)
                 {
+                    // left and right calculations can underflow with large header.counts and node counts.
                     // x >> d == x / (1 << d)
-                    uint numBitsNeededHeaderCount = (header.count > 0) ? CeilLog2((uint)header.count) : 0;
-                    uint numBitsNeededNode = (n > 0) ? CeilLog2((uint)n) : 0;
-                    uint numBitsNeeded = numBitsNeededHeaderCount + numBitsNeededNode;
-                    // Debug.Assert(numBitsNeeded < 32); // left and right calculations can underflow with large header.counts and node counts.
-                    
                     int left;
                     int right;
-                    if (numBitsNeeded < 32)
-                    {
-                        left = ((n + 0) * header.count) >> d;
-                        right = (((n + 1) * header.count) >> d) - 1;
-                    }
-                    else
                     {
                         long longLeft = (((long)n + 0) * header.count) >> d;
                         long longRight = ((((long)n + 1) * header.count) >> d) - 1;
