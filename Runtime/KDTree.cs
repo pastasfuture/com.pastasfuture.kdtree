@@ -175,23 +175,6 @@ namespace Pastasfuture.KDTree.Runtime
         }
 
         [BurstCompile]
-        public static bool TryAddHoleForPadding(ref KDTreeHeader header, ref KDTreeData data, int index)
-        {
-            if (Capacity(ref header, ref data) < (header.count + 1)) { return false; }
-
-            data.payloadIndices[header.count] = index;
-            data.positions[header.count] = float3.zero;
-            data.radii[header.count] = 0.0f;
-            
-            ++header.holeCount;
-            data.payloadIndices[header.count] = -1;
-
-            ++header.count;
-
-            return true;
-        }
-
-        [BurstCompile]
         public static bool IndexIsValid(ref KDTreeHeader header, ref KDTreeData data, int index)
         {
             return data.payloadIndices[index] != -1;
