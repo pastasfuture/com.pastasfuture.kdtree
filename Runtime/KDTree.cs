@@ -16,6 +16,7 @@ namespace Pastasfuture.KDTree.Runtime
             public NativeArray<float3> aabbs;
             public NativeArray<float> splitPositions;
             public NativeArray<byte> splitAxes;
+            public NativeArray<int2> nodeRanges;
 
             public static readonly KDTreeData zero = new KDTreeData();
         }
@@ -44,6 +45,7 @@ namespace Pastasfuture.KDTree.Runtime
             if (data.aabbs.IsCreated) { data.aabbs.Dispose(); }
             if (data.splitPositions.IsCreated) { data.splitPositions.Dispose(); }
             if (data.splitAxes.IsCreated) { data.splitAxes.Dispose(); }
+            if (data.nodeRanges.IsCreated) { data.nodeRanges.Dispose(); }
 
             header.count = 0;
             header.holeCount = 0;
@@ -60,6 +62,7 @@ namespace Pastasfuture.KDTree.Runtime
             if (data.aabbs.IsCreated) { disposalJobs = JobHandle.CombineDependencies(disposalJobs, data.aabbs.Dispose(jobHandle)); }
             if (data.splitPositions.IsCreated) { disposalJobs = JobHandle.CombineDependencies(disposalJobs, data.splitPositions.Dispose(jobHandle)); }
             if (data.splitAxes.IsCreated) { disposalJobs = JobHandle.CombineDependencies(disposalJobs, data.splitAxes.Dispose(jobHandle)); }
+            if (data.nodeRanges.IsCreated) { disposalJobs = JobHandle.CombineDependencies(disposalJobs, data.nodeRanges.Dispose(jobHandle)); }
             return disposalJobs;
         }
 
@@ -101,6 +104,7 @@ namespace Pastasfuture.KDTree.Runtime
             data.aabbs = new NativeArray<float3>(boundsCount * 2, allocator);
             data.splitPositions = new NativeArray<float>(boundsCount >> 1, allocator);
             data.splitAxes = new NativeArray<byte>(boundsCount >> 1, allocator);
+            data.nodeRanges = new NativeArray<int2>(boundsCount, allocator);
             header.depthCapacity = depthCapacity;
             header.depthCount = 0;
         }
@@ -121,6 +125,7 @@ namespace Pastasfuture.KDTree.Runtime
             NativeArray<float3>.Copy(dataSrc.aabbs, dataDst.aabbs, boundsCount);
             NativeArray<float>.Copy(dataSrc.splitPositions, dataDst.splitPositions, boundsCount >> 1);
             NativeArray<byte>.Copy(dataSrc.splitAxes, dataDst.splitAxes, boundsCount >> 1);
+            NativeArray<int2>.Copy(dataSrc.nodeRanges, dataDst.nodeRanges, boundsCount);
 
             headerDst.count = count;
             headerDst.holeCount = headerSrc.holeCount;
@@ -246,74 +251,57 @@ namespace Pastasfuture.KDTree.Runtime
             (data.radii[indexA], data.radii[indexB]) = (data.radii[indexB], data.radii[indexA]);
         }
 
+        
         [BurstCompile]
         private static void Quickselect(ref KDTreeHeader header, ref KDTreeData data, int left, int right, int n, int sortAxis)
         {
-            //int debugLeft = left;
-            //int debugRight = right;
-
-            while (left != right)
+            while (left < right)
             {
+                int pivotIndex = ((right - left) >> 1) + left;
+                float pivotKey = ComputeSortKey(ref header, ref data, pivotIndex, sortAxis);
 
-                // Partition:
-                int indexC = ((right - left) >> 1) + left;
-                float pivotData = ComputeSortKey(ref header, ref data, indexC, sortAxis);
+                // Move the pivot to the end
+                Swap(ref header, ref data, pivotIndex, right);
 
-                Swap(ref header, ref data, indexC, right);
+                // Three-way partitioning (to improve performance with many identical keys, which occurs when there are many empty slots in the tree.
+                int less = left;
+                int equal = left;
+                int greater = right;
 
-                indexC = left;
-                for (var j = left; j < right; ++j)
+                while (equal <= greater)
                 {
-                    if (ComputeSortKey(ref header, ref data, j, sortAxis) <= pivotData)
+                    float keyCurrent = ComputeSortKey(ref header, ref data, equal, sortAxis);
+
+                    if (keyCurrent < pivotKey)
                     {
-
-                        Swap(ref header, ref data, indexC, j);
-
-                        ++indexC;
+                        Swap(ref header, ref data, less, equal);
+                        less++;
+                        equal++;
+                    }
+                    else if (keyCurrent > pivotKey)
+                    {
+                        Swap(ref header, ref data, equal, greater);
+                        greater--;
+                    }
+                    else
+                    {
+                        equal++;
                     }
                 }
 
-                Swap(ref header, ref data, indexC, right);
-
-                if (indexC == n)
+                if (n < less)
                 {
-                    break;
+                    right = less - 1;
                 }
-
-                if (n < indexC)
+                else if (n > greater)
                 {
-                    Debug.Assert(indexC != 0, "Underflow");
-                    right = indexC - 1;
+                    left = greater + 1;
                 }
                 else
                 {
-                    left = indexC + 1;
+                    break;
                 }
-                
-                Debug.Assert(left >= 0);
-                Debug.Assert(right >= 0);
-                Debug.Assert(right >= left);
             }
-
-            //// Debug:
-            //float pivotKey = ComputeSortKey(ref data, n, sortAxis);
-            //for (int d = debugLeft; d <= debugRight; ++d)
-            //{
-            //    if (d < n)
-            //    {
-            //        if (!(ComputeSortKey(ref data, d, sortAxis) <= pivotKey))
-            //        {
-            //            Debug.Assert(false);
-            //        }
-            //    }
-            //    else if (d > n)
-            //    {
-            //        if (!(ComputeSortKey(ref data, d, sortAxis) >= pivotKey))
-            //        {
-            //            Debug.Assert(false);
-            //        }
-            //    }
-            //}
         }
 
         [BurstCompile]
@@ -346,70 +334,181 @@ namespace Pastasfuture.KDTree.Runtime
                 : ((extents[1] > extents[2]) ? 1 : 2);
         }
 
+        public enum KDTreePartitionScheme : uint
+        {
+            AxisMax = 0,
+            SeparationMax,
+            SurfaceAreaHeuristic
+        }
+
         [BurstCompile]
-        public static void Build(ref KDTreeHeader header, ref KDTreeData data, int depthCount)
+        public static void Build(ref KDTreeHeader header, ref KDTreeData data, int depthCount, KDTreePartitionScheme partitionScheme = KDTreePartitionScheme.AxisMax)
         {
             Debug.Assert(IsCreated(ref header, ref data));
             Debug.Assert(header.count > 0);
             Debug.Assert(header.depthCapacity >= depthCount);
             Debug.Assert(depthCount > 0);
 
-            CompactHoles(ref header, ref data);
-
             // data.count can reach zero after CompactHoles is executed.
             if (header.count == 0) { return; }
 
             header.depthCount = math.clamp(depthCount, 1, CeilLog2(header.count));
 
-            int nodeIndex = 0;
-            for (int d = 0, dLen = depthCount; d < dLen; ++d)
+            BuildRecurse(ref header, ref data, depth: 0, nodeIndex: 0, left: 0, right: header.count - 1, partitionScheme);      
+        }
+
+        [BurstCompile]
+        private static void BuildRecurse(ref KDTreeHeader header, ref KDTreeData data, int depth, int nodeIndex, int left, int right, KDTreePartitionScheme partitionScheme)
+        {
+            data.nodeRanges[nodeIndex] = new int2(left, right);
+            
+            Debug.Assert(left >= 0 && left < header.count);
+            Debug.Assert(right >= 0 && right < header.count);
+            Debug.Assert(right >= left);
+
+            ComputeAABBFromRange(out float3 aabbMin, out float3 aabbMax, ref header, ref data, left, right);
+            data.aabbs[nodeIndex * 2 + 0] = aabbMin;
+            data.aabbs[nodeIndex * 2 + 1] = aabbMax;
+            
+            // Only perform split if we are not leaf node.
+            if ((depth + 1) < header.depthCount)
             {
-                int nodeCountAtDepth = 1 << d;
-                for (int n = 0; n < nodeCountAtDepth; ++n)
+                Debug.Assert((left + 1) < right);
+                int sortAxis = -1;
+                int pivot = -1;
+                switch (partitionScheme)
                 {
-                    // left and right calculations can underflow with large header.counts and node counts.
-                    // x >> d == x / (1 << d)
-                    int left;
-                    int right;
+                    case KDTreePartitionScheme.AxisMax:
                     {
-                        long longLeft = (((long)n + 0) * header.count) >> d;
-                        long longRight = ((((long)n + 1) * header.count) >> d) - 1;
-                        Debug.Assert(longLeft >= 0);
-                        Debug.Assert(longLeft < (long)int.MaxValue);
-                        Debug.Assert(longRight >= 0);
-                        Debug.Assert(longRight < (long)int.MaxValue);
-                        left = (int)longLeft;
-                        right = (int)longRight;
+                        pivot = PartitionLargestAxis(out sortAxis, ref header, ref data, left, right, aabbMin, aabbMax);
+                        break;
                     }
 
-                    Debug.Assert(left >= 0 && left < header.count);
-                    Debug.Assert(right >= 0 && right < header.count);
-                    Debug.Assert(right >= left);
-
-                    ComputeAABBFromRange(out float3 aabbMin, out float3 aabbMax, ref header, ref data, left, right);
-
-                    data.aabbs[nodeIndex * 2 + 0] = aabbMin;
-                    data.aabbs[nodeIndex * 2 + 1] = aabbMax;
-
-                    // Only perform split if we are not leaf node.
-                    if ((d + 1) < depthCount)
+                    case KDTreePartitionScheme.SeparationMax:
                     {
-                        int sortAxis = ComputeSplitAxisFromAABB(aabbMin, aabbMax);
-
-                        int pivot = ((right - left) >> 1) + left;
-                        Debug.Assert(left <= pivot);
-                        Debug.Assert(pivot <= right);
-
-                        Quickselect(ref header, ref data, left, right, pivot, sortAxis);
-
-                        data.splitAxes[nodeIndex] = (byte)sortAxis;
-                        data.splitPositions[nodeIndex] = data.positions[pivot][sortAxis];
+                        pivot = PartitionSeparationMax(out sortAxis, ref header, ref data, left, right);
+                        break;
                     }
-                    
 
-                    ++nodeIndex;
+                    case KDTreePartitionScheme.SurfaceAreaHeuristic:
+                    {
+                        pivot = PartitionSAH(out sortAxis, ref header, ref data, left, right, aabbMin, aabbMax);
+                        break;
+                    }
+
+                    default:
+                    {
+                        Debug.Assert(false);
+                        break;
+                    }
                 }
-            }        
+
+                Debug.Assert(left <= pivot);
+                Debug.Assert(pivot <= right);
+
+                data.splitAxes[nodeIndex] = (byte)sortAxis;
+                data.splitPositions[nodeIndex] = data.positions[pivot][sortAxis];
+                
+                // Recurse into nearest child.
+                // (1 << 0) == 1
+                // (1 << 1) == 2
+                // (1 << 2) == 4
+                // (1 << 4) == 8
+                //
+                //          0
+                //    1            2
+                //  3   4       5     6
+                // 7 8 9 10   11 12 13 14
+                int nodeIndexChildLeft = (int)((nodeIndex + 1) << 1) - 1;
+                int nodeIndexChildRight = nodeIndexChildLeft + 1;
+
+                // Switch to the fastest partitioning scheme deeper in the tree.
+                KDTreePartitionScheme partitionSchemeNext = (depth > 8) ? KDTreePartitionScheme.AxisMax : partitionScheme;
+                
+                BuildRecurse(ref header, ref data, depth: depth + 1, nodeIndex: nodeIndexChildLeft, left: left, right: pivot - 1, partitionSchemeNext);
+                BuildRecurse(ref header, ref data, depth: depth + 1, nodeIndex: nodeIndexChildRight, left: pivot, right: right, partitionSchemeNext);
+            }            
+        }
+        
+        [BurstCompile]
+        private static int PartitionLargestAxis(out int sortAxis, ref KDTreeHeader header, ref KDTreeData data, int left, int right, float3 aabbMin, float3 aabbMax)
+        {
+            sortAxis = ComputeSplitAxisFromAABB(aabbMin, aabbMax);
+            int pivot = ((right - left) >> 1) + left;
+            Quickselect(ref header, ref data, left, right, pivot, sortAxis);
+            return pivot;
+        }
+
+        [BurstCompile]
+        private static int PartitionSeparationMax(out int sortAxis, ref KDTreeHeader header, ref KDTreeData data, int left, int right)
+        {
+            float separationMax = float.MinValue;
+            sortAxis = -1;
+            int pivot = ((right - left) >> 1) + left;
+
+            for (int axis = 0; axis < 3; axis++)
+            {
+                Quickselect(ref header, ref data, left, right, pivot, axis);
+
+                ComputeAABBFromRange(out float3 leftMin, out float3 leftMax, ref header, ref data, left, pivot - 1);
+                ComputeAABBFromRange(out float3 rightMin, out float3 rightMax, ref header, ref data, pivot, right);
+
+                float separationCurrent = rightMin[axis] - leftMax[axis];
+
+                if (separationCurrent > separationMax)
+                {
+                    separationMax = separationCurrent;
+                    sortAxis = axis;
+                }
+            }
+
+            Debug.Assert(sortAxis != -1);
+            Quickselect(ref header, ref data, left, right, pivot, sortAxis);
+            return pivot;
+        }
+
+        [BurstCompile]
+        private static int PartitionSAH(out int sortAxis, ref KDTreeHeader header, ref KDTreeData data, int left, int right, float3 aabbMin, float3 aabbMax)
+        {
+            const float traversalCost = 2.0f;
+            const float intersectionCost = 1.0f;
+
+            float sahBest = float.MaxValue;
+            int pivotBest = -1;
+            sortAxis = -1;
+
+            float surfaceAreaParent = ComputeAABBSurfaceArea(aabbMin, aabbMax);
+            float surfaceAreaParentInverse = (surfaceAreaParent > 1e-5f) ? (1.0f / surfaceAreaParent) : 0.0f;
+
+            for (int axis = 0; axis < 3; axis++)
+            {
+                int pivot = ((right - left) >> 1) + left;
+                Quickselect(ref header, ref data, left, right, pivot, axis);
+                ComputeAABBFromRange(out float3 leftMin, out float3 leftMax, ref header, ref data, left, pivot - 1);
+                ComputeAABBFromRange(out float3 rightMin, out float3 rightMax, ref header, ref data, pivot, right);
+
+                float leftArea = ComputeAABBSurfaceArea(leftMin, leftMax);
+                float rightArea = ComputeAABBSurfaceArea(rightMin, rightMax);
+
+                float sah = traversalCost + intersectionCost * surfaceAreaParentInverse * ((leftArea * (pivot - left)) + (rightArea * ((right - pivot) + 1)));
+
+                if (sah < sahBest)
+                {
+                    sahBest = sah;
+                    pivotBest = pivot;
+                    sortAxis = axis;
+                }
+            }
+
+            Quickselect(ref header, ref data, left, right, pivotBest, sortAxis);
+            return pivotBest;
+        }
+
+        [BurstCompile]
+        private static float ComputeAABBSurfaceArea(float3 min, float3 max)
+        {
+            float3 size = max - min;
+            return size.x * size.z * 2.0f + size.x * size.y * 2.0f + size.y * size.z * 2.0f;
         }
 
         [BurstCompile]
@@ -439,108 +538,6 @@ namespace Pastasfuture.KDTree.Runtime
         }
 
         [BurstCompile]
-        public static void FindNearestNeighborStackless(out int index, out float distanceSquared, ref KDTreeHeader header, ref KDTreeData data, float3 position, float distanceSquaredMax = float.MaxValue)
-        {
-            Debug.Assert(IsCreated(ref header, ref data));
-            Debug.Assert(header.count > 0);
-            Debug.Assert(header.depthCount > 0);
-
-            index = -1;
-            distanceSquared = distanceSquaredMax;
-
-            KDTreeTraversalState state = KDTreeTraversalState.zero;
-            while (FindNearestNeighborStacklessIterator(out int left, out int right, ref distanceSquared, ref state, ref header, ref data, position))
-            {
-                if (left == -1) { continue; }
-                
-                Debug.Assert(left >= 0 && left < header.count);
-                Debug.Assert(right >= 0 && right < header.count);
-
-                for (int i = left; i <= right; ++i)
-                {
-                    if (!IndexIsValid(ref header, ref data, i)) { continue; } // Item has been removed. Skip.
-                    if (float.IsNaN(data.positions[i].x) || float.IsNaN(data.positions[i].y) || float.IsNaN(data.positions[i].z)) { continue; }
-                    if (float.IsNaN(data.radii[i])) { continue; }
-
-                    float distanceCurrent = math.max(0.0f, math.length(data.positions[i] - position) - data.radii[i]);
-                    float distanceSquaredCurrent = distanceCurrent * distanceCurrent;
-                    if (distanceSquaredCurrent < distanceSquared)
-                    {
-                        distanceSquared = distanceSquaredCurrent;
-                        index = i;
-                    }
-                }
-            }
-        }
-
-        [BurstCompile]
-        public static void FindNearestNeighborStacklessGeneralizedLeftFirst(out int index, out float distanceSquared, ref KDTreeHeader header, ref KDTreeData data, float3 position, float distanceSquaredMax = float.MaxValue)
-        {
-            Debug.Assert(IsCreated(ref header, ref data));
-            Debug.Assert(header.count > 0);
-            Debug.Assert(header.depthCount > 0);
-
-            index = -1;
-            distanceSquared = distanceSquaredMax;
-
-            KDTreeTraversalStateGeneralized state = KDTreeTraversalStateGeneralized.zero;
-            while (FindNearestNeighborStacklessGeneralizedLeftFirstIterator(out int left, out int right, distanceSquared, ref state, ref header, ref data, position))
-            {
-                Debug.Assert(left >= 0 && left < header.count);
-                Debug.Assert(right >= 0 && right < header.count);
-
-                for (int i = left; i <= right; ++i)
-                {
-                    if (!IndexIsValid(ref header, ref data, i)) { continue; } // Item has been removed. Skip.
-                    if (float.IsNaN(data.positions[i].x) || float.IsNaN(data.positions[i].y) || float.IsNaN(data.positions[i].z)) { continue; }
-                    if (float.IsNaN(data.radii[i])) { continue; }
-
-                    float distanceCurrent = math.max(0.0f, math.length(data.positions[i] - position) - data.radii[i]);
-                    float distanceSquaredCurrent = distanceCurrent * distanceCurrent;
-                    if (distanceSquaredCurrent < distanceSquared)
-                    {
-                        distanceSquared = distanceSquaredCurrent;
-                        index = i;
-                    }
-                }
-            }
-        }
-
-        // TODO: There seem to be bugs with the StacklessGeneralizedIterator - so we need to use FindNearestNeighborStacklessGeneralizedLeftFirstIterator for now (which is less optimal).
-        // [BurstCompile]
-        // public static void FindNearestNeighborStacklessGeneralized(out int index, out float distanceSquared, ref KDTreeHeader header, ref KDTreeData data, float3 position, float distanceSquaredMax = float.MaxValue)
-        // {
-        //     Debug.Assert(IsCreated(ref header, ref data));
-        //     Debug.Assert(header.count > 0);
-        //     Debug.Assert(header.depthCount > 0);
-
-        //     index = -1;
-        //     distanceSquared = distanceSquaredMax;
-
-        //     KDTreeTraversalStateGeneralized state = KDTreeTraversalStateGeneralized.zero;
-        //     while (FindNearestNeighborStacklessGeneralizedIterator(out int left, out int right, ref distanceSquared, ref state, ref header, ref data, position))
-        //     {
-        //         Debug.Assert(left >= 0 && left < header.count);
-        //         Debug.Assert(right >= 0 && right < header.count);
-
-        //         for (int i = left; i <= right; ++i)
-        //         {
-        //             if (!IndexIsValid(ref header, ref data, i)) { continue; } // Item has been removed. Skip.
-        //             if (float.IsNaN(data.positions[i].x) || float.IsNaN(data.positions[i].y) || float.IsNaN(data.positions[i].z)) { continue; }
-        //             if (float.IsNaN(data.radii[i])) { continue; }
-
-        //             float distanceCurrent = math.max(0.0f, math.length(data.positions[i] - position) - data.radii[i]);
-        //             float distanceSquaredCurrent = distanceCurrent * distanceCurrent;
-        //             if (distanceSquaredCurrent < distanceSquared)
-        //             {
-        //                 distanceSquared = distanceSquaredCurrent;
-        //                 index = i;
-        //             }
-        //         }
-        //     }
-        // }
-
-        [BurstCompile]
         public static void FindNearestNeighbor(out int index, out float distanceSquared, ref KDTreeHeader header, ref KDTreeData data, float3 position, float distanceSquaredMax = float.MaxValue)
         {
             Debug.Assert(IsCreated(ref header, ref data));
@@ -549,116 +546,22 @@ namespace Pastasfuture.KDTree.Runtime
 
             index = -1;
             distanceSquared = distanceSquaredMax;
-            FindNearestNeighborRecursive(ref index, ref distanceSquared, ref header, ref data, position, 0, 0);
-        }
-
-        [BurstCompile]
-        private static void FindNearestNeighborRecursive(ref int index, ref float distanceSquared, ref KDTreeHeader header, ref KDTreeData data, float3 position, int depth, int nodeIndexAtDepth)
-        {
-            if (IsLeaf(ref header, ref data, depth))
+            KDTreeTraversalStateGeneralizedOptimized state = KDTreeTraversalStateGeneralizedOptimized.zero;
+            while (FindNearestNeighborStacklessGeneralizedIteratorOptimized(out int left, out int right, distanceSquared, ref state, ref header, ref data, position))
             {
-                FindNearestNeighborInLeaf(ref index, ref distanceSquared, ref header, ref data, position, depth, nodeIndexAtDepth);
-            }
-            else
-            {
-                FindNearestNeighborInBranches(ref index, ref distanceSquared, ref header, ref data, position, depth, nodeIndexAtDepth);
-            }
-        }
-
-        [BurstCompile]
-        private static void FindNearestNeighborInLeaf(ref int index, ref float distanceSquared, ref KDTreeHeader header, ref KDTreeData data, float3 position, int depth, int nodeIndexAtDepth)
-        {
-            Debug.Assert(IsCreated(ref header, ref data));
-            Debug.Assert(header.count > 0);
-            Debug.Assert(header.depthCount > 0);
-
-            Debug.Assert(IsLeaf(ref header, ref data, depth));
-
-            // Leaf node.
-            // Loop over all contained elements and find nearest point.
-            ComputeNodeIndexRange(out int left, out int right, ref header, ref data, depth, nodeIndexAtDepth);
-
-            Debug.Assert(left >= 0 && left < header.count);
-            Debug.Assert(right >= 0 && right < header.count);
-
-            for (int i = left; i <= right; ++i)
-            {
-                if (!IndexIsValid(ref header, ref data, i)) { continue; } // Item has been removed. Skip.
-                if (float.IsNaN(data.positions[i].x) || float.IsNaN(data.positions[i].y) || float.IsNaN(data.positions[i].z)) { continue; }
-                if (float.IsNaN(data.radii[i])) { continue; }
-
-                float distanceCurrent = math.max(0.0f, math.length(data.positions[i] - position) - data.radii[i]);
-                float distanceSquaredCurrent = distanceCurrent * distanceCurrent;
-                if (distanceSquaredCurrent < distanceSquared)
+                for (int i = left; i <= right; ++i)
                 {
-                    distanceSquared = distanceSquaredCurrent;
-                    index = i;
-                }
-            }
-        }
+                    if (!IndexIsValid(ref header, ref data, i)) { continue; } // Item has been removed. Skip.
+                    if (float.IsNaN(data.positions[i].x) || float.IsNaN(data.positions[i].y) || float.IsNaN(data.positions[i].z)) { continue; }
+                    if (float.IsNaN(data.radii[i])) { continue; }
 
-        [BurstCompile]
-        private static void FindNearestNeighborInBranches(ref int index, ref float distanceSquared, ref KDTreeHeader header, ref KDTreeData data, float3 position, int depth, int nodeIndexAtDepth)
-        {
-            Debug.Assert(IsCreated(ref header, ref data));
-            Debug.Assert(header.count > 0);
-            Debug.Assert(header.depthCount > 0);
-
-            Debug.Assert(!IsLeaf(ref header, ref data, depth));
-
-            // Node has children.
-            // Recurse into nearest child.
-            // (1 << 0) == 1
-            // (1 << 1) == 2
-            // (1 << 2) == 4
-            // (1 << 4) == 8
-            //
-            //          0
-            //    1            2
-            //  3   4       5     6
-            // 7 8 9 10   11 12 13 14
-            int nodeIndexParent = ComputeNodeParent(ref header, ref data, depth, nodeIndexAtDepth);
-
-            int sortAxisParent = data.splitAxes[nodeIndexParent];
-            float splitPlaneParent = data.splitPositions[nodeIndexParent];
-            float splitPlaneDistanceSigned = position[sortAxisParent] - splitPlaneParent;
-
-            int childDepth = depth + 1;
-            int childLeftNodeIndexAtDepth = nodeIndexAtDepth * 2 + 0;
-            int childRightNodeIndexAtDepth = nodeIndexAtDepth * 2 + 1;
-
-            // Use split plane as heristic for deciding which child to enter first.
-            int childNearNodeIndexAtDepth = (splitPlaneDistanceSigned <= 0.0f) ? childLeftNodeIndexAtDepth : childRightNodeIndexAtDepth;
-            int childFarNodeIndexAtDepth = (splitPlaneDistanceSigned <= 0.0f) ? childRightNodeIndexAtDepth : childLeftNodeIndexAtDepth;
-
-            // Use actual AABBs to determine whether or not we need to enter the child.
-            {
-
-                int nodeIndexChild = ComputeNodeParent(ref header, ref data, childDepth, childNearNodeIndexAtDepth);
-                float3 aabbMin = data.aabbs[nodeIndexChild * 2 + 0];
-                float3 aabbMax = data.aabbs[nodeIndexChild * 2 + 1];
-                float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
-                float3 sampleMin = position - new float3(distance, distance, distance);
-                float3 sampleMax = position + new float3(distance, distance, distance);
-
-                if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
-                {
-                    FindNearestNeighborRecursive(ref index, ref distanceSquared, ref header, ref data, position, childDepth, childNearNodeIndexAtDepth);
-                }
-            }
-
-            {
-
-                int nodeIndexChild = ComputeNodeParent(ref header, ref data, childDepth, childFarNodeIndexAtDepth);
-                float3 aabbMin = data.aabbs[nodeIndexChild * 2 + 0];
-                float3 aabbMax = data.aabbs[nodeIndexChild * 2 + 1];
-                float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
-                float3 sampleMin = position - new float3(distance, distance, distance);
-                float3 sampleMax = position + new float3(distance, distance, distance);
-
-                if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
-                {
-                    FindNearestNeighborRecursive(ref index, ref distanceSquared, ref header, ref data, position, childDepth, childFarNodeIndexAtDepth);
+                    float distanceCurrent = math.max(0.0f, math.length(data.positions[i] - position) - data.radii[i]);
+                    float distanceSquaredCurrent = distanceCurrent * distanceCurrent;
+                    if (distanceSquaredCurrent < distanceSquared)
+                    {
+                        distanceSquared = distanceSquaredCurrent;
+                        index = i;
+                    }
                 }
             }
         }
@@ -670,317 +573,10 @@ namespace Pastasfuture.KDTree.Runtime
         }
 
         [BurstCompile]
-        public static void ComputeNodeIndexRange(out int left, out int right, ref KDTreeHeader header, ref KDTreeData data, int depth, int nodeIndexAtDepth)
+        public static void ComputeNodeIndexRange(out int left, out int right, ref KDTreeHeader header, ref KDTreeData data, int nodeIndex)
         {
-            // x >> d == x / (1 << depth)
-            long longLeft = (((long)nodeIndexAtDepth + 0) * header.count) >> depth;
-            long longRight = ((((long)nodeIndexAtDepth + 1) * header.count) >> depth) - 1;
-            left = (int)longLeft;
-            right = (int)longRight;
-        }
-
-        [BurstCompile]
-        public struct KDTreeTraversalState
-        {
-            public enum Direction : byte
-            {
-                Down = 0,
-                Up,
-                Side
-            };
-
-            public Direction direction;
-            public int depth;
-            public int nodeIndexAtDepth;
-
-            public static readonly KDTreeTraversalState zero = new KDTreeTraversalState
-            {
-                direction = Direction.Down,
-                depth = 0,
-                nodeIndexAtDepth = 0
-            };
-        }
-
-        [BurstCompile]
-        public static bool FindNearestNeighborStacklessIterator(out int left, out int right, ref float distanceSquared, ref KDTreeTraversalState state, ref KDTreeHeader header, ref KDTreeData data, float3 position)
-        {
-            Debug.Assert(IsCreated(ref header, ref data));
-            Debug.Assert(header.count > 0);
-            Debug.Assert(header.depthCount > 0);
-            Debug.Assert(header.depthCount > state.depth);
-            Debug.Assert(state.depth >= 0);
-
-            left = -1;
-            right = -1;
-
-            KDTreeTraversalState stateNextUp = new KDTreeTraversalState()
-            {
-                direction = KDTreeTraversalState.Direction.Up,
-                depth = state.depth - 1,
-                nodeIndexAtDepth = state.nodeIndexAtDepth >> 1
-            };
-
-            KDTreeTraversalState stateNextDownLeft = new KDTreeTraversalState()
-            {
-                direction = KDTreeTraversalState.Direction.Down,
-                depth = state.depth + 1,
-                nodeIndexAtDepth = (state.nodeIndexAtDepth << 1) + 0
-            };
-
-            KDTreeTraversalState stateNextDownRight = new KDTreeTraversalState()
-            {
-                direction = KDTreeTraversalState.Direction.Down,
-                depth = state.depth + 1,
-                nodeIndexAtDepth = (state.nodeIndexAtDepth << 1) + 1
-            };
-
-            KDTreeTraversalState stateNextRight = new KDTreeTraversalState()
-            {
-                direction = KDTreeTraversalState.Direction.Side,
-                depth = state.depth,
-                nodeIndexAtDepth = state.nodeIndexAtDepth + 1
-            };
-
-            KDTreeTraversalState stateNextLeft = new KDTreeTraversalState()
-            {
-                direction = KDTreeTraversalState.Direction.Side,
-                depth = state.depth,
-                nodeIndexAtDepth = state.nodeIndexAtDepth - 1
-            };
-
-            if (state.direction == KDTreeTraversalState.Direction.Up)
-            {
-                if (state.depth == 0)
-                {
-                    // Finished traversing back up to root. Done.
-                    return false;
-                }
-
-
-                if (IsNodeLeft(state.nodeIndexAtDepth))
-                {
-                    // At left node. Move right.
-                    state = stateNextRight;
-                    return true;
-                }
-                else
-                {
-                    // At right node. Move up.
-                    state = stateNextUp;
-                    return true;
-                }
-            }
-            else // Down or Side
-            {
-                if (IsLeaf(ref header, ref data, state.depth))
-                {
-                    // Leaf node.
-                    // Return range to loop over all contained elements and find nearest point.
-                    // Perform an AABB check here to early out.
-                    // Previous aabb checks during the traversal simply test which side of the split plane we are on.
-                    // TODO: Rather than AABB against AABB intersection, a more accurate cull would be AABB against sphere.
-                    float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
-                    int nodeIndexParent = ComputeNodeParent(ref header, ref data, state.depth, state.nodeIndexAtDepth);
-                    float3 aabbMin = data.aabbs[nodeIndexParent * 2 + 0];
-                    float3 aabbMax = data.aabbs[nodeIndexParent * 2 + 1];
-                    float3 sampleMin = position - new float3(distance, distance, distance);
-                    float3 sampleMax = position + new float3(distance, distance, distance);
-                    
-                    if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
-                    {
-                        ComputeNodeIndexRange(out left, out right, ref header, ref data, state.depth, state.nodeIndexAtDepth);
-                    }
-
-                    if (state.direction == KDTreeTraversalState.Direction.Side)
-                    {
-                        // Came from the side. Time to move up.
-                        state = stateNextUp;
-                        return true;
-                    }
-                    else
-                    {
-                        // Came from above. Time to move to the side.
-                        Debug.Assert(state.direction == KDTreeTraversalState.Direction.Down);
-                        // state = IsNodeLeft(state.nodeIndexAtDepth) ? stateNextRight : stateNextLeft;
-                        //Debug.Assert(IsNodeLeft(state.nodeIndexAtDepth)); // Always traverse into left first.
-                        state = stateNextRight;
-                        return true;
-                    }
-                }
-                else
-                {
-                    // Node has children.
-                    // Recurse into nearest child.
-                    // (1 << 0) == 1
-                    // (1 << 1) == 2
-                    // (1 << 2) == 4
-                    // (1 << 4) == 8
-                    //
-                    //          0
-                    //    1            2
-                    //  3   4       5     6
-                    // 7 8 9 10   11 12 13 14
-                    int nodeIndexParent = ComputeNodeParent(ref header, ref data, state.depth, state.nodeIndexAtDepth);
-                    int sortAxisParent = data.splitAxes[nodeIndexParent];
-                    float splitPlaneParent = data.splitPositions[nodeIndexParent];
-                    float splitPlaneDistanceSigned = position[sortAxisParent] - splitPlaneParent;
-                    // float splitPlaneDistanceSquared = splitPlaneDistanceSigned * splitPlaneDistanceSigned;
-
-                    // KDTreeTraversalState stateNextNear = (splitPlaneDistanceSigned <= 0.0f) ? stateNextDownLeft : stateNextDownRight;
-                    // KDTreeTraversalState stateNextFar = (splitPlaneDistanceSigned <= 0.0f) ? stateNextDownRight : stateNextDownLeft;
-
-                    // Always traverse down left first.
-                    state = stateNextDownLeft;
-                    return true;
-
-                    //if (state.direction == KDTreeTraversalState.Direction.Side)
-                    //{
-                    //    // Came from the side. We are in the right node.
-                    //    // Move down left.
-                    //    state = stateNextDownLeft;
-                    //    //
-                    //    // Potential early out: if distance to the split plane is greater than our current nearest distance,
-                    //    // we know that no points within opposite split plane can be closer.
-                    //    //if (splitPlaneDistanceSigned >= 0.0f || splitPlaneDistanceSquared < distanceSquared)
-                    //    //{
-                    //    //    state = stateNextDownRight;
-                    //    //    return true;
-                    //    //}
-                    //    //else
-                    //    //{
-                    //    //    state = stateNextUp;
-                    //    //    return true;
-                    //    //}
-                    //}
-                    //else
-                    //{
-                    //    // Came from above. We are in the left node.
-                    //    // Move down right.
-                    //    Debug.Assert(state.direction == KDTreeTraversalState.Direction.Down);
-
-                    //    state = stateNextDownRight;
-
-                    //    //if (splitPlaneDistanceSigned < 0.0f || splitPlaneDistanceSquared < distanceSquared)
-                    //    //{
-                    //    //    state = stateNextDownLeft;
-                    //    //    return true;
-                    //    //}
-                    //    //else
-                    //    //{
-                    //    //    // Skip left side, and go straight to right side.
-                    //    //    // Need to encode it as if we came from the left for our state machine to work.
-                    //    //    state = stateNextDownRight;
-                    //    //    state.direction = KDTreeTraversalState.Direction.Side;
-                    //    //    return true;
-                    //    //}
-                    //}
-                }
-            }
-
-            // Should never reach here.
-            //Debug.Assert(false);
-        }
-
-        // http://jcgt.org/published/0002/01/03/paper.pdf
-        [BurstCompile]
-        public struct KDTreeTraversalStateGeneralized
-        {
-            public uint levelStart;
-            public uint levelIndex;
-            public uint swapMask;
-
-            public static readonly KDTreeTraversalStateGeneralized zero = new KDTreeTraversalStateGeneralized
-            {
-                levelStart = 1,
-                levelIndex = 0,
-                swapMask = 0
-            };
-        }
-
-        [BurstCompile]
-        public static bool FindNearestNeighborStacklessGeneralizedLeftFirstIterator(out int left, out int right, float distanceSquared, ref KDTreeTraversalStateGeneralized state, ref KDTreeHeader header, ref KDTreeData data, float3 position)
-        {
-            Debug.Assert(IsCreated(ref header, ref data));
-            Debug.Assert(header.count > 0);
-            Debug.Assert(header.depthCount > 0);
-            // Debug.Assert(header.depthCount > state.depth);
-            // Debug.Assert(state.depth >= 0);
-
-            left = -1;
-            right = -1;
-
-            while (state.levelStart >= 1)
-            {
-                int nodeIndex = (int)(state.levelStart + state.levelIndex - 1u);
-
-                int depth = (int)CeilLog2(state.levelStart); // TODO: Fixme!
-
-                if (IsLeaf(ref header, ref data, (int)depth))
-                {
-                    // Leaf node.
-                    // Return range to loop over all contained elements and find nearest point.
-                    // Perform an AABB check here to early out.
-                    // Previous aabb checks during the traversal simply test which side of the split plane we are on.
-                    // TODO: Rather than AABB against AABB intersection, a more accurate cull would be AABB against sphere.
-                    float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
-                    float3 aabbMin = data.aabbs[nodeIndex * 2 + 0];
-                    float3 aabbMax = data.aabbs[nodeIndex * 2 + 1];
-                    float3 sampleMin = position - new float3(distance, distance, distance);
-                    float3 sampleMax = position + new float3(distance, distance, distance);
-
-                    if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
-                    {
-                        ComputeNodeIndexRange(out left, out right, ref header, ref data, (int)depth, (int)state.levelIndex);
-
-                        // Move up a level.
-                        state.levelIndex = state.levelIndex + 1;
-                        uint up = CountTrailingZeros(state.levelIndex);
-                        state.levelStart >>= (int)up;
-                        state.levelIndex >>= (int)up;
-                        state.levelStart = (state.levelStart == 1) ? 0 : state.levelStart; // Signal if we are done, back at root.
-                        return true; // More to do.
-                    }
-                }
-                else
-                {
-                    // Branch
-                    // Node has children.
-                    // Recurse into nearest child.
-                    // (1 << 0) == 1
-                    // (1 << 1) == 2
-                    // (1 << 2) == 4
-                    // (1 << 4) == 8
-                    //
-                    //          0
-                    //    1            2
-                    //  3   4       5     6
-                    // 7 8 9 10   11 12 13 14
-                    float3 aabbMin = data.aabbs[nodeIndex * 2 + 0];
-                    float3 aabbMax = data.aabbs[nodeIndex * 2 + 1];
-
-                    // Use actual AABBs to determine whether or not we need to enter the child.
-                    float distance = (distanceSquared > 1e-5f) ? math.sqrt(distanceSquared) : 0.0f;
-                    float3 sampleMin = position - new float3(distance, distance, distance);
-                    float3 sampleMax = position + new float3(distance, distance, distance);
-
-                    if (ComputeAABBContainsAABB(aabbMin, aabbMax, sampleMin, sampleMax))
-                    {
-                        state.levelStart <<= 1;
-                        state.levelIndex <<= 1;
-                        continue;
-                    }
-                }
-
-                {
-                    state.levelIndex = state.levelIndex + 1;
-                    uint up = CountTrailingZeros(state.levelIndex);
-                    state.levelStart >>= (int)up;
-                    state.levelIndex >>= (int)up;
-                    if (state.levelStart == 1) { return false; }
-                }
-            }
-
-            return false;
+            left = data.nodeRanges[nodeIndex].x;
+            right = data.nodeRanges[nodeIndex].y;
         }
         
         // http://jcgt.org/published/0002/01/03/paper.pdf
@@ -1026,9 +622,8 @@ namespace Pastasfuture.KDTree.Runtime
                     if (ComputeAABBContainsSphere(aabbMin, aabbMax, position, distance))
                     {
                         {
-                            // Performing this operation in 64 bit is required for kd trees with large element counts and or deep depths.
-                            left = (int)((((long)nodeIndex - (1 << depth) + 1 + 0) * header.count) >> depth);
-                            right = (int)(((((long)nodeIndex - (1 << depth) + 1 + 1) * header.count) >> depth) - 1);
+                            left = data.nodeRanges[nodeIndex].x;
+                            right = data.nodeRanges[nodeIndex].y;
                         }
 
                         {
@@ -1172,8 +767,8 @@ namespace Pastasfuture.KDTree.Runtime
                     if (ComputeAABBContainsSphere(aabbMin, aabbMax, rayOrigin, distance))
                     {
                         {
-                            left = (int)(((long)(nodeIndex - (1 << depth) + 1 + 0) * header.count) >> depth);
-                            right = (int)((((long)(nodeIndex - (1 << depth) + 1 + 1) * header.count) >> depth) - 1);
+                            left = data.nodeRanges[nodeIndex].x;
+                            right = data.nodeRanges[nodeIndex].y;
                         }
 
                         // Leaf node found, inline traversal state update before returning

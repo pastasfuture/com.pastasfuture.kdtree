@@ -186,6 +186,26 @@ namespace Pastasfuture.KDTree.Runtime
                 headerForJobs[0] = header;
             }
         }
+        
+        [BurstCompile]
+        public struct BuildWithPartitionSchemeJob : IJob
+        {
+            // In order to work around current limitations of the dependancy graph in job system (and copy-style structs),
+            // we supply a NativeArray<KDTree.KDTreeHeader> of Length 1.
+            // This allows the header struct to be updated in the job, and passed to dependant jobs.
+            public NativeArray<KDTree.KDTreeHeader> headerForJobs;
+            public KDTree.KDTreeData data;
+
+            [ReadOnly] public int depthCount;
+            [ReadOnly] public KDTree.KDTreePartitionScheme partitionScheme;
+
+            public void Execute()
+            {
+                KDTree.KDTreeHeader header = headerForJobs[0];
+                KDTree.Build(ref header, ref data, depthCount, partitionScheme);
+                headerForJobs[0] = header;
+            }
+        }
 
         [BurstCompile]
         public struct FindNearestNeighborsJob : IJobParallelFor
